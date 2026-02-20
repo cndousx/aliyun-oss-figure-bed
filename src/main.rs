@@ -1,10 +1,8 @@
-use aliyun_oss_client::file::Files;
 use aliyun_oss_client::Client;
 use chrono::Local;
 use futures::stream::{self, StreamExt};
 use std::env;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::Path;
 use uuid::Uuid;
 
 #[tokio::main]
@@ -16,28 +14,25 @@ async fn main() {
     for i in start..args.len() {
         let file = &args[i];
         if !Path::new(&file).exists() {
-            panic!();
+            panic!("文件 {} 不存在", file);
         }
         if let None = Path::new(&file).extension() {
-            panic!();
+            panic!("文件 {} 没有扩展名", file);
         }
     }
-
     let client = Client::from_env().unwrap();
-    let endpoint = client
-        .get_bucket_base()
-        .endpoint()
-        .to_url()
-        .to_string()
-        .replace("https://", "")
-        .replace("/", "");
-    let bucket = client.get_bucket_base().get_name().to_string();
-    let client = Arc::new(client);
+    let buckets = client.get_buckets().await.unwrap();
+    if buckets.len() != 1 {
+        panic!("Expected exactly one bucket");
+    }
+
+    let bucket = buckets.get(0).unwrap();
+    let bucket_url = bucket.to_url().unwrap().as_str().to_string();
 
     let tasks: Vec<_> = (start..args.len())
         .map(|i| {
-            let file = args[i].clone();
-            let ext = match Path::new(&file).extension() {
+            let arg = &args[i];
+            let ext = match Path::new(arg).extension() {
                 None => {
                     panic!();
                 }
@@ -47,20 +42,25 @@ async fn main() {
             let uuid_simple = Uuid::new_v4().simple();
             let fs = format!("{timestamp}-{uuid_simple}.{ext}");
             let md = format!("markdown/{fs}");
-            let url = format!("https://{bucket}.{endpoint}/{md}");
-            let tc = client.clone();
+            let url = format!("{}{}", bucket_url, md);
 
             async move {
-                match tc.put_file(PathBuf::from(&file), md).await {
-                    Ok(_) => {
-                        if is_md {
-                            Some(format!("![{fs}]({url})"))
-                        } else {
-                            Some(url)
+                match tokio::fs::File::open(arg).await {
+                    Ok(file) => match &bucket.object(&md).upload(file).await {
+                        Ok(_) => {
+                            if is_md {
+                                Some(format!("![{timestamp}]({url})"))
+                            } else {
+                                Some(url)
+                            }
                         }
-                    }
+                        Err(e) => {
+                            eprintln!("上传异常: {} {}", arg, e);
+                            None
+                        }
+                    },
                     Err(e) => {
-                        eprintln!("上传异常: {}", e);
+                        eprintln!("文件打开失败: {} {}", arg, e);
                         None
                     }
                 }
@@ -68,9 +68,14 @@ async fn main() {
         })
         .collect();
 
+    let max_concurrent = std::env::var("ALIYUN-OSS-FIGURE-BED-MAX-CONCURRENT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3); // 默认并发数为3
+
     // 使用 stream 控制并发数
     let results: Vec<_> = stream::iter(tasks)
-        .buffer_unordered(3) // 最多同时运行3个任务
+        .buffer_unordered(max_concurrent) // 最多同时运行max_concurrent个任务
         .collect()
         .await;
 

@@ -1,10 +1,10 @@
 [package]
 name = "aliyun-oss-figure-bed"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2024"
 
 [dependencies]
-aliyun-oss-client = "0.12"
+aliyun-oss-client = "0.13"
 tokio = { version = "1.49.0", features = ["full"] }
 chrono = "0.4.43"
 uuid = { version = "1.21.0", features = ["v4"] }
