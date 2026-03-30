@@ -22,7 +22,11 @@
       "name": "Release",
       "cargo": {
         // cargo相关配置
-        "args": ["build", "--release"]
+        "args": ["build", "--release"],
+        "filter": {
+          "name": "aliyun-oss-figure-bed",
+          "kind": "bin"
+        }
       },
       "args": ["img/dog.jpg", "img/dog2.jpg"], // 程序启动参数
       "cwd": "${workspaceFolder}" // 程序启动目录
