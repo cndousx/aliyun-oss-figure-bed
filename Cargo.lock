@@ -29,7 +29,7 @@ dependencies = [
 
 [[package]]
 name = "aliyun-oss-figure-bed"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "aliyun-oss-client",
  "chrono",
