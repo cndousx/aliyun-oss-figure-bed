@@ -8,7 +8,7 @@ use uuid::Uuid;
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = env::args().collect();
-    let (out_md, upload_infos) = parse_args(&args);
+    let (out_md, uploads) = parse_args(&args);
 
     let client = Client::from_env().unwrap();
     let buckets = client.get_buckets().await.unwrap();
@@ -19,7 +19,7 @@ async fn main() {
     let bucket = buckets.get(0).unwrap();
     let bucket_url = bucket.to_url().unwrap().as_str().to_string();
 
-    let tasks = upload_infos
+    let tasks = uploads
         .iter()
         .map(|(arg, ext)| {
             let timestamp = Local::now().format("%Y/%m/%d/%H-%M-%S-%3f").to_string();
@@ -52,11 +52,9 @@ async fn main() {
         })
         .collect::<Vec<_>>();
 
-    let max_concurrent = max_concurrent();
-
     // 使用 stream 控制并发数
     let results: Vec<_> = stream::iter(tasks)
-        .buffer_unordered(max_concurrent) // 最多同时运行max_concurrent个任务
+        .buffer_unordered(max_concurrent())
         .collect()
         .await;
 
@@ -77,29 +75,27 @@ fn max_concurrent() -> usize {
 }
 /// 解析参数
 fn parse_args(args: &Vec<String>) -> (bool, Vec<(&String, String)>) {
-    let (is_md, start) = validate_args(&args).unwrap();
-    (
-        is_md,
-        (start..args.len())
-            .map(|i| {
-                let arg = &args[i];
-                let file = Path::new(&arg);
-                if !file.exists() {
-                    panic!("文件不存在：{}", arg);
-                }
-                if let None = file.extension() {
+    let (out_md, start) = validate_args(&args).unwrap();
+    let uploads = (start..args.len())
+        .map(|i| {
+            let arg = &args[i];
+            let file = Path::new(&arg);
+            if !file.exists() {
+                panic!("文件不存在：{}", arg);
+            }
+            if let None = file.extension() {
+                panic!("文件没有扩展名：{}", arg);
+            }
+            let ext = match file.extension() {
+                None => {
                     panic!("文件没有扩展名：{}", arg);
                 }
-                let ext = match file.extension() {
-                    None => {
-                        panic!("文件没有扩展名：{}", arg);
-                    }
-                    Some(ext) => ext.to_string_lossy().to_string(),
-                };
-                (arg, ext)
-            })
-            .collect::<Vec<_>>(),
-    )
+                Some(ext) => ext.to_string_lossy().to_string(),
+            };
+            (arg, ext)
+        })
+        .collect::<Vec<_>>();
+    (out_md, uploads)
 }
 /// 校验参数
 fn validate_args(args: &[String]) -> Result<(bool, usize), String> {
