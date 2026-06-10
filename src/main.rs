@@ -1,114 +1,148 @@
-use aliyun_oss_client::Client;
+use aliyun_oss_client::{Bucket, Client};
+use anyhow::{Result, anyhow};
 use chrono::Local;
 use futures::stream::{self, StreamExt};
+use mime_guess::from_ext;
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use uuid::Uuid;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<()> {
+    // 解析参数
     let args: Vec<String> = env::args().collect();
-    let (out_md, uploads) = parse_args(&args);
+    let (out_md, uploads) = parse_args(&args)?;
 
-    let client = Client::from_env().unwrap();
-    let buckets = client.get_buckets().await.unwrap();
-    if buckets.len() != 1 {
-        panic!("Expected exactly one bucket");
-    }
+    // 根据环境变量构建oss bucket
+    let client = Client::from_env().map_err(|e| anyhow!("初始化 OSS Client 失败: {}", e))?;
+    let bucket = Arc::new(oss_bucket(&client).await?);
+    let url = bucket.to_url()?;
 
-    let bucket = buckets.get(0).unwrap();
-    let bucket_url = bucket.to_url().unwrap().as_str().to_string();
+    let tasks = create_upload_future(uploads, bucket, url.as_str(), out_md);
 
-    let tasks = uploads
-        .iter()
-        .map(|(arg, ext)| {
-            let timestamp = Local::now().format("%Y/%m/%d/%H-%M-%S-%3f").to_string();
-            let uuid_simple = Uuid::new_v4().simple();
-            let fs = format!("{timestamp}-{uuid_simple}.{ext}");
-            let md = format!("markdown/{fs}");
-            let url = format!("{}{}", bucket_url, md);
+    execute_upload_tasks(tasks).await?;
 
-            async move {
-                match tokio::fs::File::open(arg).await {
-                    Ok(file) => match &bucket.object(&md).upload(file).await {
-                        Ok(_) => {
-                            if out_md {
-                                Some(format!("![{timestamp}]({url})"))
-                            } else {
-                                Some(url)
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("上传异常: {} {}", arg, e);
-                            None
-                        }
-                    },
-                    Err(e) => {
-                        eprintln!("文件打开失败: {} {}", arg, e);
-                        None
-                    }
-                }
-            }
-        })
-        .collect::<Vec<_>>();
+    Ok(())
+}
 
-    // 使用 stream 控制并发数
+/// 执行所有上传任务
+async fn execute_upload_tasks(
+    tasks: Vec<impl Future<Output = Option<String>> + Send>,
+) -> Result<()> {
     let results = stream::iter(tasks)
         .buffer_unordered(max_concurrent())
         .collect::<Vec<_>>()
         .await;
 
     for result in results {
-        match result {
-            Some(output) => println!("{}", output),
-            None => {}
+        if let Some(output) = result {
+            println!("{}", output);
         }
     }
+
+    Ok(())
+}
+/// 构建上传任务
+fn create_upload_future(
+    uploads: Vec<(PathBuf, String)>,
+    bucket: Arc<Bucket>,
+    bucket_url: &str,
+    out_md: bool,
+) -> Vec<impl Future<Output = Option<String>>> {
+    uploads
+        .into_iter()
+        .map(move |(path, ext)| {
+            let bucket = Arc::clone(&bucket);
+            let out_md = out_md;
+            let timestamp = Local::now().format("%Y/%m/%d/%H-%M-%S-%3f").to_string();
+            let uuid_simple = Uuid::new_v4().simple();
+            let filename = format!("{timestamp}-{uuid_simple}.{ext}");
+            let key = format!("markdown/{filename}");
+            let url = format!("{}{}", bucket_url, key);
+
+            async move {
+                match upload_file(&bucket, &key, &path, &ext).await {
+                    Ok(_) => {
+                        if out_md {
+                            Some(format!("![{timestamp}]({url})"))
+                        } else {
+                            Some(url)
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("上传失败 {}: {}", path.display(), e);
+                        None
+                    }
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+}
+async fn oss_bucket(client: &Client) -> Result<Bucket> {
+    let buckets = client.get_buckets().await?;
+    if buckets.len() != 1 {
+        anyhow::bail!("OSS Bucket err")
+    } else {
+        buckets
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("未找到可用的 OSS Bucket"))
+    }
 }
 
-/// 获取最大并发数
+async fn upload_file(bucket: &Arc<Bucket>, key: &str, path: &Path, ext: &str) -> Result<()> {
+    let file = tokio::fs::File::open(path).await?;
+    let mut object = bucket.object(key);
+
+    // 设置正确的 Content-Type
+    if let Some(mime) = from_ext(ext).first() {
+        object = object.content_type_mime(mime);
+    }
+
+    object.upload(file).await?;
+    Ok(())
+}
+
 fn max_concurrent() -> usize {
-    std::env::var("ALIYUN-OSS-FIGURE-BED-MAX-CONCURRENT")
+    env::var("ALIYUN_OSS_FIGURE_BED_MAX_CONCURRENT")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(1) as usize // 默认并发数为1
+        .unwrap_or(3) // 默认并发数 3，可通过环境变量调整
 }
-/// 解析参数
-fn parse_args(args: &Vec<String>) -> (bool, Vec<(&String, String)>) {
-    let (out_md, start) = validate_args(&args).unwrap();
-    let uploads = (start..args.len())
-        .map(|i| {
-            let arg = &args[i];
-            let file = Path::new(&arg);
-            if !file.exists() {
-                panic!("文件不存在：{}", arg);
-            }
-            if let None = file.extension() {
-                panic!("文件没有扩展名：{}", arg);
-            }
-            let ext = match file.extension() {
-                None => {
-                    panic!("文件没有扩展名：{}", arg);
-                }
-                Some(ext) => ext.to_string_lossy().to_string(),
-            };
-            (arg, ext)
-        })
-        .collect::<Vec<_>>();
-    (out_md, uploads)
-}
-/// 校验参数
-fn validate_args(args: &[String]) -> Result<(bool, usize), String> {
-    if args.len() < 2 {
-        return Err("至少需要一个文件参数".to_string());
-    }
 
-    let is_md = &args[1] == "md";
-    let start = if is_md { 2 } else { 1 };
+fn parse_args(args: &[String]) -> Result<(bool, Vec<(PathBuf, String)>)> {
+    if args.len() < 2 {
+        anyhow::bail!(
+            "缺少参数，用法示例: {} [md] <file1> [file2 ...]",
+            args.first().map_or("oss-upload", |s| s.as_str())
+        );
+    }
+    // 是否以md格式输出结果
+    // true 则输出 [name](url)
+    // false 仅输出url
+    let out_md = args.get(1).map_or(false, |s| s == "md");
+    let start = if out_md { 2 } else { 1 };
 
     if start >= args.len() {
-        return Err("没有提供文件参数".to_string());
+        anyhow::bail!("没有提供文件参数");
     }
 
-    Ok((is_md, start))
+    let uploads = (start..args.len())
+        .map(|i| {
+            let path = PathBuf::from(&args[i]);
+            if !path.exists() {
+                anyhow::bail!("文件不存在: {}", path.display());
+            }
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .ok_or_else(|| anyhow!("文件没有扩展名: {}", path.display()))?
+                .to_lowercase();
+
+            Ok((path, ext))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok((out_md, uploads))
 }
