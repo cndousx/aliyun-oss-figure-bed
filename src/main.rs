@@ -53,9 +53,9 @@ async fn main() {
         .collect::<Vec<_>>();
 
     // 使用 stream 控制并发数
-    let results: Vec<_> = stream::iter(tasks)
+    let results = stream::iter(tasks)
         .buffer_unordered(max_concurrent())
-        .collect()
+        .collect::<Vec<_>>()
         .await;
 
     for result in results {
