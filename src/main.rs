@@ -56,8 +56,9 @@ fn create_upload_future(
             let bucket = Arc::clone(&bucket);
             let out_md = out_md;
             let timestamp = Local::now().format("%Y/%m/%d/%H-%M-%S-%3f").to_string();
-            let uuid_simple = Uuid::new_v4().simple();
-            let filename = format!("{timestamp}-{uuid_simple}.{ext}");
+            // 使用当前时间生成 UUID v7
+            let uid = Uuid::now_v7();
+            let filename = format!("{timestamp}-{uid}.{ext}");
             let key = format!("markdown/{filename}");
             let url = format!("{}{}", bucket_url, key);
 
